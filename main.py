@@ -90,7 +90,15 @@ app.add_middleware(
 
 # Configuración de Seguridad y LLM
 pwd_context = CryptContext(schemes=["scrypt"], deprecated="auto")
-AIMLAPI_URL = os.getenv("AIMLAPI_URL", "http://localhost:11434/api/generate")
+
+# Configuración de IA - Soporta Ollama local, Groq cloud o AIML API
+AI_PROVIDER = os.getenv("AI_PROVIDER", "ollama")  # "ollama", "groq" o "aiml"
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+AIMLAPI_URL = os.getenv("AIMLAPI_URL", "http://localhost:11434/api/generate")  # Mantener por compatibilidad
+AIML_API_KEY = os.getenv("AIML_API_KEY", "")
+AIML_API_URL = "https://api.aimlapi.com/chat/completions"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # --- CONSTANTES DE SEGURIDAD JWT ---
 SECRET_KEY = os.getenv("SECRET_KEY", "tu-clave-secreta-super-larga") 
@@ -1292,22 +1300,55 @@ Proporciona retroalimentación educativa:
 Sé claro, amable y educativo. Ayuda al alumno a entender el concepto.
 """
 
-        # 3. Llamar a Ollama
-        payload = {
-            "model": "tinyllama", 
-            "prompt": prompt_correccion, 
-            "stream": False, 
-            "options": {
-                "temperature": 0.3,
-                "top_p": 0.9,
-                "num_predict": 200
+        # 3. Llamar a IA (AIML API, Groq o Ollama)
+        if AI_PROVIDER == "aiml" and AIML_API_KEY:
+            headers = {
+                "Authorization": f"Bearer {AIML_API_KEY}",
+                "Content-Type": "application/json"
             }
-        }
-        
-        response = requests.post(AIMLAPI_URL, json=payload, timeout=60)
-        response.raise_for_status()
-        
-        correccion_texto = response.json().get("response", "Error al obtener corrección de IA").strip()
+            payload = {
+                "model": "meta-llama/Llama-3-8b-chat-hf",
+                "messages": [
+                    {"role": "system", "content": "Eres un tutor de programación."},
+                    {"role": "user", "content": prompt_correccion}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 300
+            }
+            response = requests.post(AIML_API_URL, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            correccion_texto = response.json()["choices"][0]["message"]["content"].strip()
+        elif AI_PROVIDER == "groq" and GROQ_API_KEY:
+            headers = {
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "mixtral-8x7b-32768",
+                "messages": [
+                    {"role": "system", "content": "Eres un tutor de programación."},
+                    {"role": "user", "content": prompt_correccion}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 300
+            }
+            response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            correccion_texto = response.json()["choices"][0]["message"]["content"].strip()
+        else:
+            payload = {
+                "model": "tinyllama", 
+                "prompt": prompt_correccion, 
+                "stream": False, 
+                "options": {
+                    "temperature": 0.3,
+                    "top_p": 0.9,
+                    "num_predict": 200
+                }
+            }
+            response = requests.post(OLLAMA_URL if 'OLLAMA_URL' in dir() else AIMLAPI_URL, json=payload, timeout=60)
+            response.raise_for_status()
+            correccion_texto = response.json().get("response", "Error al obtener corrección de IA").strip()
         
         # 4. Procesar y limpiar la respuesta
         correccion_limpia = procesar_retroalimentacion(correccion_texto, respuesta.respuesta, respuesta_correcta_oficial)
@@ -1603,33 +1644,70 @@ def ai_query_proxy(consulta: AIConsulta):
         Por favor, proporciona una respuesta educativa y útil basada en el contexto:
         """
 
-        payload = {
-            "model": "tinyllama",
-            "prompt": prompt_final, 
-            "stream": False,
-            "options": {
-                "temperature": 0.2,  # Un poco más bajo para respuestas más consistentes
-                "top_p": 0.9,
-                "top_k": 40
+        # Decidir qué proveedor usar
+        if AI_PROVIDER == "aiml" and AIML_API_KEY:
+            # Usar AIML API (cloud) - Compatible con OpenAI
+            headers = {
+                "Authorization": f"Bearer {AIML_API_KEY}",
+                "Content-Type": "application/json"
             }
-        }
-        
-        response = requests.post(AIMLAPI_URL, json=payload, timeout=60)
-        response.raise_for_status()
-        
-        respuesta_json = response.json()
-        texto_generado = respuesta_json.get("response", "Error al obtener texto de Ollama.").strip()
+            payload = {
+                "model": "meta-llama/Llama-3-8b-chat-hf",  # Modelo gratuito y mejor
+                "messages": [
+                    {"role": "system", "content": "Eres CodeMentor, un tutor de programación."},
+                    {"role": "user", "content": prompt_final}
+                ],
+                "temperature": 0.2,
+                "max_tokens": 500
+            }
+            response = requests.post(AIML_API_URL, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            texto_generado = response.json()["choices"][0]["message"]["content"].strip()
+        elif AI_PROVIDER == "groq" and GROQ_API_KEY:
+            # Usar Groq (cloud)
+            headers = {
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "mixtral-8x7b-32768",
+                "messages": [
+                    {"role": "system", "content": "Eres CodeMentor, un tutor de programación."},
+                    {"role": "user", "content": prompt_final}
+                ],
+                "temperature": 0.2,
+                "max_tokens": 500
+            }
+            response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            texto_generado = response.json()["choices"][0]["message"]["content"].strip()
+        else:
+            # Usar Ollama (local)
+            payload = {
+                "model": "tinyllama",
+                "prompt": prompt_final, 
+                "stream": False,
+                "options": {
+                    "temperature": 0.2,
+                    "top_p": 0.9,
+                    "top_k": 40
+                }
+            }
+            response = requests.post(OLLAMA_URL if 'OLLAMA_URL' in dir() else AIMLAPI_URL, json=payload, timeout=60)
+            response.raise_for_status()
+            texto_generado = response.json().get("response", "Error al obtener texto de IA.").strip()
         
         # Limpiar y formatear la respuesta
         respuesta_limpia = limpiar_respuesta_ia(texto_generado)
         
         return {
             "respuesta": respuesta_limpia,
-            "contexto_usado_del_tema": consulta.tema_id
+            "contexto_usado_del_tema": consulta.tema_id,
+            "provider": AI_PROVIDER
         }
 
     except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=503, detail="El servicio de IA (Ollama) está caído o no responde.")
+        raise HTTPException(status_code=503, detail=f"El servicio de IA está caído o no responde: {e}")
     except HTTPException as e:
         raise e
     except Exception as e:
