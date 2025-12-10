@@ -1307,7 +1307,7 @@ Sé claro, amable y educativo. Ayuda al alumno a entender el concepto.
                 "Content-Type": "application/json"
             }
             payload = {
-                "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+                "model": "deepseek/deepseek-chat",
                 "messages": [
                     {"role": "system", "content": "Eres un tutor de programación."},
                     {"role": "user", "content": prompt_correccion}
@@ -1645,14 +1645,17 @@ def ai_query_proxy(consulta: AIConsulta):
         """
 
         # Decidir qué proveedor usar
+        print(f"🤖 Usando proveedor de IA: {AI_PROVIDER}")
+        
         if AI_PROVIDER == "aiml" and AIML_API_KEY:
             # Usar AIML API (cloud) - Compatible con OpenAI
+            print(f"🔑 API Key presente: {bool(AIML_API_KEY)}")
             headers = {
                 "Authorization": f"Bearer {AIML_API_KEY}",
                 "Content-Type": "application/json"
             }
             payload = {
-                "model": "meta-llama/Llama-3-8b-chat-hf",  # Modelo gratuito y mejor
+                "model": "deepseek/deepseek-chat",  # DeepSeek V3 - Modelo potente
                 "messages": [
                     {"role": "system", "content": "Eres CodeMentor, un tutor de programación."},
                     {"role": "user", "content": prompt_final}
@@ -1660,7 +1663,9 @@ def ai_query_proxy(consulta: AIConsulta):
                 "temperature": 0.2,
                 "max_tokens": 500
             }
+            print(f"📡 Enviando petición a: {AIML_API_URL}")
             response = requests.post(AIML_API_URL, json=payload, headers=headers, timeout=30)
+            print(f"✅ Status code: {response.status_code}")
             response.raise_for_status()
             texto_generado = response.json()["choices"][0]["message"]["content"].strip()
         elif AI_PROVIDER == "groq" and GROQ_API_KEY:
@@ -1706,8 +1711,21 @@ def ai_query_proxy(consulta: AIConsulta):
             "provider": AI_PROVIDER
         }
 
+    except requests.exceptions.Timeout:
+        print("❌ Error: Timeout al conectar con IA")
+        raise HTTPException(status_code=504, detail="La IA tardó demasiado en responder. Intenta de nuevo.")
+    except requests.exceptions.HTTPError as e:
+        print(f"❌ Error HTTP de IA: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=503, detail=f"Error de la API de IA: {e.response.text}")
     except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=503, detail=f"El servicio de IA está caído o no responde: {e}")
+        print(f"❌ Error de conexión con IA: {str(e)}")
+        raise HTTPException(status_code=503, detail=f"No se pudo conectar con el servicio de IA: {str(e)}")
+    except KeyError as e:
+        print(f"❌ Error al procesar respuesta de IA: {e}")
+        raise HTTPException(status_code=500, detail="La IA devolvió una respuesta en formato inesperado")
+    except Exception as e:
+        print(f"❌ Error inesperado: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error interno al procesar la consulta: {str(e)}")
     except HTTPException as e:
         raise e
     except Exception as e:

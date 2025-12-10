@@ -56,7 +56,7 @@ def probar_aiml_directamente():
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+        "model": "deepseek/deepseek-chat",
         "messages": [
             {"role": "system", "content": "Eres un asistente útil."},
             {"role": "user", "content": "Responde con una sola palabra: ¿Estás funcionando correctamente?"}
