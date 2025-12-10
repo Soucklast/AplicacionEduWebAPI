@@ -112,7 +112,7 @@ class UserCreate(BaseModel):
     email: str
     password: str
     nombre: str
-    rol: str = "admin"  # Por defecto admin, ya no hay alumnos
+    rol: str = "alumno"  # Por defecto alumno, se puede especificar el rol
 
 class Token(BaseModel):
     access_token: str
@@ -159,7 +159,14 @@ class ContenidoUpdate(BaseModel):
     descripcion: Optional[str] = None
     numero: Optional[int] = None  
 
-
+class ProgresoCreate(BaseModel):
+    """Esquema para registrar progreso del alumno."""
+    tema_id: str
+    unidad_id: str
+    materia_id: str
+    completado: bool = True
+    puntuacion: Optional[int] = None
+    tiempo_dedicado: Optional[int] = None
 
 class TokenData(BaseModel):
     email: Optional[str] = None
@@ -288,7 +295,14 @@ async def get_current_admin(current_user: dict = Depends(get_current_user)):
         )
     return current_user
 
-
+async def get_current_alumno(current_user: dict = Depends(get_current_user)):
+    """Verifica que el usuario tenga rol de alumno."""
+    if current_user.get("rol") != "alumno":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Acceso Denegado. Esta funcionalidad es solo para alumnos.",
+        )
+    return current_user
 
 # ===============================================
 # ENDPOINTS PÚBLICOS
@@ -1215,10 +1229,188 @@ class EjercicioRespuesta(BaseModel):
 
 
 # ===============================================
+# ENDPOINTS DE EJERCICIOS (ALUMNO)
+# ===============================================
+
+@app.get("/api/v1/alumno/ejercicios/{tema_id}")
+def get_ejercicios_por_tema_alumno(tema_id: str, user: dict = Depends(get_current_alumno)):
+    """Alumno: Obtener ejercicios de un tema (sin respuestas correctas)."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="La Base de Datos no está conectada.")
+    
+    try:
+        ejercicios_ref = db.collection("Ejercicios").where("tema_id", "==", tema_id).get()
+        
+        ejercicios = []
+        for doc in ejercicios_ref:
+            data = doc.to_dict()
+            # No enviar la respuesta correcta al alumno
+            if 'respuesta_correcta' in data:
+                del data['respuesta_correcta']
+            data['id'] = doc.id
+            ejercicios.append(data)
+            
+        return ejercicios
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener ejercicios: {e}")
+
+# ===============================================
 #CORRECCION CON IA 
 # ===============================================
 # --- RUTA DE CORRECCIÓN INTELIGENTE (MEJORADA CON RETROALIMENTACIÓN REAL) ---
 
+@app.post("/api/v1/alumno/corregir_ia", status_code=status.HTTP_200_OK)
+def corregir_ejercicio_ia(respuesta: EjercicioRespuesta, user: dict = Depends(get_current_alumno)):
+    """Alumno: Envía una respuesta abierta. La IA la compara con la solución ideal."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="La Base de Datos no está conectada.")
+
+    try:
+        # 1. Obtener datos (Ejercicio, Solución)
+        ejercicio_doc = db.collection("Ejercicios").document(respuesta.ejercicio_id).get()
+        if not ejercicio_doc.exists:
+            raise HTTPException(status_code=404, detail="Ejercicio no encontrado")
+        
+        ejercicio_data = ejercicio_doc.to_dict()
+        respuesta_correcta_oficial = ejercicio_data.get("respuesta_correcta", "Solución no definida.")
+        enunciado = ejercicio_data.get("enunciado", "")
+        
+        # 2. PROMPT MEJORADO - Enfocado en dar retroalimentación educativa
+        prompt_correccion = f"""
+Eres un tutor de programación. Un alumno respondió a esta pregunta:
+
+Pregunta: {enunciado}
+
+El alumno respondió: "{respuesta.respuesta}"
+
+La respuesta ideal es: "{respuesta_correcta_oficial}"
+
+Proporciona retroalimentación educativa:
+- Si la respuesta es correcta: "¡Correcto! [Explica por qué está bien y refuerza el concepto]"
+- Si la respuesta es incorrecta: "¡Incorrecto! [Señala el error y explica el concepto correcto]"
+
+Sé claro, amable y educativo. Ayuda al alumno a entender el concepto.
+"""
+
+        # 3. Llamar a Ollama
+        payload = {
+            "model": "tinyllama", 
+            "prompt": prompt_correccion, 
+            "stream": False, 
+            "options": {
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "num_predict": 200
+            }
+        }
+        
+        response = requests.post(AIMLAPI_URL, json=payload, timeout=60)
+        response.raise_for_status()
+        
+        correccion_texto = response.json().get("response", "Error al obtener corrección de IA").strip()
+        
+        # 4. Procesar y limpiar la respuesta
+        correccion_limpia = procesar_retroalimentacion(correccion_texto, respuesta.respuesta, respuesta_correcta_oficial)
+        
+        # 5. Determinar si es correcta (lógica mejorada)
+        es_correcta = determinar_si_es_correcta(respuesta.respuesta, respuesta_correcta_oficial, correccion_limpia)
+        
+        return {
+            "es_correcta": es_correcta,
+            "puntuacion": 100 if es_correcta else 0,
+            "retroalimentacion": correccion_limpia,
+            "explicacion_adicional": "Evaluación realizada por el tutor IA."
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al procesar la corrección de IA: {e}")
+
+def procesar_retroalimentacion(texto_ia, respuesta_alumno, respuesta_correcta):
+    """Procesa y mejora la retroalimentación de la IA."""
+    
+    # Si la IA no dio una respuesta útil, crear una por defecto
+    if not texto_ia or len(texto_ia.strip()) < 10:
+        if respuesta_alumno.lower().strip() == respuesta_correcta.lower().strip():
+            return f"¡Correcto! '{respuesta_alumno}' es la respuesta adecuada. Has comprendido bien el concepto."
+        else:
+            return f"¡Incorrecto! La respuesta correcta es: '{respuesta_correcta}'. Tu respuesta fue: '{respuesta_alumno}'. Sigue practicando."
+    
+    # Limpiar texto repetitivo
+    lineas = texto_ia.split('\n')
+    lineas_limpias = []
+    
+    for linea in lineas:
+        linea_limpia = linea.strip()
+        # Remover líneas que son solo repeticiones del prompt
+        if any(patron in linea_limpia.lower() for patron in [
+            'pregunta:', 'el alumno respondió:', 'la respuesta ideal es:', 
+            'proporciona retroalimentación', 'eres un tutor'
+        ]):
+            continue
+        if linea_limpia and len(linea_limpia) > 5:
+            lineas_limpias.append(linea_limpia)
+    
+    resultado = ' '.join(lineas_limpias)
+    
+    # Asegurar que tenga un formato adecuado
+    if not resultado.startswith('¡Correcto!') and not resultado.startswith('¡Incorrecto!'):
+        if respuesta_alumno.lower().strip() == respuesta_correcta.lower().strip():
+            resultado = f"¡Correcto! {resultado}"
+        else:
+            resultado = f"¡Incorrecto! {resultado}"
+    
+    return resultado
+
+def determinar_si_es_correcta(respuesta_alumno, respuesta_correcta, retroalimentacion):
+    """Determina si la respuesta es correcta usando múltiples criterios."""
+    
+    # 1. Comparación directa (case-insensitive)
+    if respuesta_alumno.lower().strip() == respuesta_correcta.lower().strip():
+        return True
+    
+    # 2. Basado en la retroalimentación de la IA
+    if 'correcto' in retroalimentacion.lower() and 'incorrecto' not in retroalimentacion.lower():
+        return True
+    if 'incorrecto' in retroalimentacion.lower():
+        return False
+    
+    # 3. Comparación de similitud básica
+    palabras_alumno = set(respuesta_alumno.lower().split())
+    palabras_correcta = set(respuesta_correcta.lower().split())
+    similitud = len(palabras_alumno.intersection(palabras_correcta)) / len(palabras_correcta)
+    
+    return similitud > 0.7  # 70% de similitud
+
+
+@app.post("/api/v1/alumno/ejercicios/verificar")
+def verificar_respuesta_ejercicio(respuesta: EjercicioRespuesta, user: dict = Depends(get_current_alumno)):
+    """Alumno: Verificar si su respuesta es correcta."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="La Base de Datos no está conectada.")
+    
+    try:
+        # Obtener el ejercicio
+        ejercicio_doc = db.collection("Ejercicios").document(respuesta.ejercicio_id).get()
+        
+        if not ejercicio_doc.exists:
+            raise HTTPException(status_code=404, detail="Ejercicio no encontrado")
+        
+        ejercicio_data = ejercicio_doc.to_dict()
+        respuesta_correcta = ejercicio_data.get("respuesta_correcta", "")
+        
+        # Verificar si la respuesta es correcta
+        es_correcta = respuesta.respuesta.strip().lower() == respuesta_correcta.strip().lower()
+        
+        return {
+            "es_correcta": es_correcta,
+            "respuesta_correcta": respuesta_correcta if not es_correcta else None,
+            "mensaje": "¡Correcto!" if es_correcta else "Respuesta incorrecta. Intenta nuevamente."
+        }
+    
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al verificar respuesta: {e}")
 
 
 
@@ -1231,6 +1423,145 @@ class EjercicioRespuesta(BaseModel):
 
 
 
+
+
+# ===============================================
+# ENDPOINTS DE ALUMNO
+# ===============================================
+
+@app.get("/api/v1/alumno/materias")
+def get_materias_alumno(user: dict = Depends(get_current_alumno)):
+    """Alumno: Ver todas las materias disponibles."""
+    return get_all_materias()
+
+@app.get("/api/v1/alumno/materias/{materia_id}/unidades")
+def get_unidades_alumno(materia_id: str, user: dict = Depends(get_current_alumno)):
+    """Alumno: Ver unidades de una materia específica."""
+    return get_unidades_por_materia(materia_id)
+
+@app.get("/api/v1/alumno/unidades/{unidad_id}/temas")
+def get_temas_alumno(unidad_id: str, user: dict = Depends(get_current_alumno)):
+    """Alumno: Ver temas de una unidad específica."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="La Base de Datos no está conectada.")
+    
+    try:
+        temas_ref = db.collection("Temas").where("id_unidad", "==", unidad_id).get()
+        temas = []
+        for doc in temas_ref:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            temas.append(data)
+            
+        temas.sort(key=lambda x: x.get('numero', 99))
+        return temas
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar temas: {e}")
+
+@app.get("/api/v1/alumno/contenidos")
+def get_contenidos_alumno(user: dict = Depends(get_current_alumno)):
+    """Alumno: Obtener todos los contenidos disponibles."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="La Base de Datos no está conectada.")
+    
+    try:
+        contenidos_ref = db.collection("Contenidos").get()
+        contenidos = []
+        for doc in contenidos_ref:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            contenidos.append(data)
+            
+        return contenidos
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar contenidos: {e}")
+
+@app.get("/api/v1/alumno/contenidos/unidad/{unidad_id}")
+def get_contenidos_por_unidad_alumno(unidad_id: str, user: dict = Depends(get_current_alumno)):
+    """Alumno: Obtener contenidos por unidad."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="La Base de Datos no está conectada.")
+    
+    try:
+        contenidos_ref = db.collection("Contenidos").where("id_unidad", "==", unidad_id).get()
+        contenidos = []
+        for doc in contenidos_ref:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            contenidos.append(data)
+            
+        contenidos.sort(key=lambda x: x.get('numero', 99))
+        return contenidos
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar contenidos: {e}")
+    
+    
+@app.get("/api/v1/alumno/contenido/tema/{tema_id}")
+def get_contenido_alumno(tema_id: str, user: dict = Depends(get_current_alumno)):
+    """Alumno: Obtener contenido de un tema específico."""
+    return get_tema_api(tema_id)
+
+@app.post("/api/v1/alumno/progreso", status_code=201)
+def registrar_progreso_alumno(progreso: ProgresoCreate, user: dict = Depends(get_current_alumno)):
+    """Alumno: Registrar progreso en un tema."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="La Base de Datos no está conectada.")
+    
+    try:
+        progreso_data = progreso.dict()
+        progreso_data["user_email"] = user["email"]
+        progreso_data["fecha_completado"] = datetime.utcnow()
+        
+        progreso_id = f"{user['email']}_{progreso.tema_id}"
+        db.collection("ProgresoAlumnos").document(progreso_id).set(progreso_data)
+        
+        return {"message": "Progreso registrado exitosamente"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al registrar progreso: {e}")
+
+
+@app.post("/api/v1/alumno/progreso/unidad")
+def registrar_progreso_unidad(progreso: ProgresoCreate, user: dict = Depends(get_current_alumno)):
+    """Alumno: Registrar progreso de una unidad completa."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="La Base de Datos no está conectada.")
+    
+    try:
+        progreso_data = progreso.dict()
+        progreso_data["user_email"] = user["email"]
+        progreso_data["fecha_completado"] = datetime.utcnow()
+        progreso_data["tipo"] = "unidad_completada"
+        
+        progreso_id = f"{user['email']}_unidad_{progreso.unidad_id}"
+        db.collection("ProgresoAlumnos").document(progreso_id).set(progreso_data)
+        
+        return {"message": "Progreso de unidad registrado exitosamente"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al registrar progreso: {e}")
+
+@app.get("/api/v1/alumno/mi-progreso")
+def get_mi_progreso_alumno(user: dict = Depends(get_current_alumno)):
+    """Alumno: Ver mi progreso personal."""
+    if db is None:
+        raise HTTPException(status_code=500, detail="La Base de Datos no está conectada.")
+    
+    try:
+        progreso_ref = db.collection("ProgresoAlumnos").where("user_email", "==", user["email"]).get()
+        
+        progreso = []
+        for doc in progreso_ref:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            progreso.append(data)
+            
+        return progreso
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener progreso: {e}")
+
+@app.post("/api/v1/alumno/ai/consulta")
+def consulta_ai_alumno(consulta: AIConsulta, user: dict = Depends(get_current_alumno)):
+    """Alumno: Consultar al tutor IA."""
+    return ai_query_proxy(consulta)
 
 # ===============================================
 # MÓDULO DE INTELIGENCIA ARTIFICIAL
