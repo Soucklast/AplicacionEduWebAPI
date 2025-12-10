@@ -1307,7 +1307,7 @@ Sé claro, amable y educativo. Ayuda al alumno a entender el concepto.
                 "Content-Type": "application/json"
             }
             payload = {
-                "model": "meta-llama/Llama-3-8b-chat-hf",
+                "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
                 "messages": [
                     {"role": "system", "content": "Eres un tutor de programación."},
                     {"role": "user", "content": prompt_correccion}
